@@ -8,43 +8,59 @@ import pandas as pd
 import json
 from datetime import datetime
 import os
+import time
 
 MIN_VOLUME = 30_000_000
 TIMEFRAMES = ['1h', '4h']
 
 def get_usdt_perpetual_symbols():
     url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
-    resp = requests.get(url, timeout=30)
-    data = resp.json()
-    symbols = []
-    for s in data['symbols']:
-        if (s['contractType'] == 'PERPETUAL' and 
-            s['quoteAsset'] == 'USDT' and 
-            s['status'] == 'TRADING' and
-            'USDC' not in s['baseAsset']):
-            symbols.append(s['symbol'])
-    return symbols
+    try:
+        resp = requests.get(url, timeout=30)
+        data = resp.json()
+        if 'symbols' not in data:
+            print(f"API响应错误: {data}")
+            return []
+        symbols = []
+        for s in data['symbols']:
+            if (s['contractType'] == 'PERPETUAL' and 
+                s['quoteAsset'] == 'USDT' and 
+                s['status'] == 'TRADING' and
+                'USDC' not in s['baseAsset']):
+                symbols.append(s['symbol'])
+        return symbols
+    except Exception as e:
+        print(f"获取交易对失败: {e}")
+        return []
 
 def get_24h_volume():
     url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
-    resp = requests.get(url, timeout=30)
-    data = resp.json()
-    volumes = {}
-    for t in data:
-        volumes[t['symbol']] = float(t.get('quoteVolume', 0))
-    return volumes
+    try:
+        resp = requests.get(url, timeout=30)
+        data = resp.json()
+        volumes = {}
+        for t in data:
+            volumes[t['symbol']] = float(t.get('quoteVolume', 0))
+        return volumes
+    except Exception as e:
+        print(f"获取成交额失败: {e}")
+        return {}
 
 def get_klines(symbol, interval, limit=200):
     url = "https://fapi.binance.com/fapi/v1/klines"
     params = {'symbol': symbol, 'interval': interval, 'limit': limit}
     resp = requests.get(url, params=params, timeout=30)
     data = resp.json()
+    if not data:
+        return None
     df = pd.DataFrame(data, columns=[
         'open_time', 'open', 'high', 'low', 'close', 'volume',
         'close_time', 'quote_volume', 'trades', 'taker_buy_base',
         'taker_buy_quote', 'ignore'
     ])
     df['close'] = df['close'].astype(float)
+    df['high'] = df['high'].astype(float)
+    df['low'] = df['low'].astype(float)
     return df
 
 def calculate_ema(df, periods=[5, 20, 30, 99]):
@@ -119,8 +135,15 @@ def check_fresh_breakout(df, timeframe):
 def scan_market():
     print(f"开始扫描... {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     symbols = get_usdt_perpetual_symbols()
+    if not symbols:
+        print("错误: 无法获取交易对列表，API可能被限制")
+        return []
     print(f"共{len(symbols)}个USDT永续合约")
+    
     volumes = get_24h_volume()
+    if not volumes:
+        print("警告: 无法获取成交额数据")
+    
     valid_symbols = [s for s in symbols if volumes.get(s, 0) >= MIN_VOLUME]
     print(f"成交额>=3000万的: {len(valid_symbols)}个")
     
@@ -137,6 +160,8 @@ def scan_market():
             
             for tf in TIMEFRAMES:
                 df = get_klines(symbol, tf)
+                if df is None:
+                    continue
                 df = calculate_ema(df)
                 score, details = check_ema_bullish(df)
                 fresh, tag = check_fresh_breakout(df, tf)
@@ -147,7 +172,7 @@ def scan_market():
                         best_score = score
                         best_details = details
                         best_tag = tag
-        except:
+        except Exception as e:
             continue
         
         if best_score >= 60:
@@ -174,12 +199,10 @@ def main():
         json.dump(output, f, ensure_ascii=False, indent=2)
     print(f"\n结果已保存到 results.json")
     
-    gh_output = os.environ.get('GITHUB_OUTPUT', '/dev/stdout')
-    with open(gh_output, 'a') as gh:
-        gh.write(f"found={len(results)}\n")
-        if results:
-            top5 = [r['symbol'] for r in results[:5]]
-            gh.write(f"top_symbols={','.join(top5)}\n")
+    if results:
+        print("\n=== TOP 10 EMA多头排列币种 ===")
+        for i, r in enumerate(results[:10], 1):
+            print(f"{i}. {r['symbol']}: {r['score']}分 | ${r['price']:.4f} | 成交额{r['volume_24h']/1e6:.1f}M | {r['tag']}")
 
 if __name__ == '__main__':
     main()
